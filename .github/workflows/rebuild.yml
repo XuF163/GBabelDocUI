@@ -17,7 +17,6 @@ env:
   REGISTRY: ghcr.io
   REPO_LOWER: ${{ github.repository_owner }}/${{ github.event.repository.name }}
   GHCR_REPO: ghcr.io/${{ github.repository }}
-  DOCKERHUB_REPO: awwaawwa/pdfmathtranslate-next
   WIN_EXE_PYTHON_VERSION: "3.13.3"
 
 jobs:
@@ -249,17 +248,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.DOCKERHUB_REPO }}
             ${{ env.GHCR_REPO_LOWER }}
           tags: |
             type=raw,value=latest
             type=raw,value=${{ needs.get-latest-release.outputs.tag }}-babeldoc-v${{ needs.build-win64-exe.outputs.babeldoc_version }}
-      - name: Login to Docker.io
-        uses: docker/login-action@v3
-        with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -274,7 +266,7 @@ jobs:
         with:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,"name=${{ env.DOCKERHUB_REPO }},${{ env.GHCR_REPO_LOWER }}",push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.GHCR_REPO_LOWER }},push-by-digest=true,name-canonical=true,push=true
           cache-from: ${{ matrix.platform == 'linux/amd64' && 'type=gha' || '' }}
           cache-to: ${{ matrix.platform == 'linux/amd64' && 'type=gha,mode=max' || '' }}
           context: .
@@ -306,12 +298,6 @@ jobs:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
           merge-multiple: true
-      - name: Login to Docker.io
-        uses: docker/login-action@v3
-        with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -323,7 +309,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.DOCKERHUB_REPO }}
             ${{ env.GHCR_REPO_LOWER }}
           tags: |
             type=raw,value=latest
@@ -332,11 +317,9 @@ jobs:
         working-directory: ${{ runner.temp }}/digests
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.DOCKERHUB_REPO }}@sha256:%s ' *)
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.GHCR_REPO_LOWER }}@sha256:%s ' *)
       - name: Inspect image
-        run: docker buildx imagetools inspect ${{ env.DOCKERHUB_REPO }}:${{ needs.get-latest-release.outputs.tag }}-babeldoc-v${{ needs.build-win64-exe.outputs.babeldoc_version }}
+        run: docker buildx imagetools inspect ${{ env.GHCR_REPO_LOWER }}:${{ needs.get-latest-release.outputs.tag }}-babeldoc-v${{ needs.build-win64-exe.outputs.babeldoc_version }}
 
   upload-release-asset:
     name: Upload Asset to Release
