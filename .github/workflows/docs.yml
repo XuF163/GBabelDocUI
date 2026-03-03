@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "pyproject.toml"
           activate-environment: true
 
       - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV 
