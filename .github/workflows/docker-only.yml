@@ -1,4 +1,4 @@
-name: Build Docker & Windows EXE
+name: Build Docker
 
 on:
   push:
@@ -7,111 +7,16 @@ on:
       - master
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 env:
   REGISTRY: ghcr.io
   GHCR_REPO: ghcr.io/${{ github.repository }}
-  WIN_EXE_PYTHON_VERSION: "3.13.3"
 
 jobs:
-  # Windows EXE构建
-  build-win64-exe:
-    runs-on: windows-latest
-    outputs:
-      babeldoc_version: ${{ steps.get-babeldoc-version.outputs.version }}
-    steps:
-      - name: checkout babeldoc metadata
-        uses: actions/checkout@v5
-        with:
-          repository: funstory-ai/BabelDOC
-          path: babeldoctemp1234567
-          token: ${{ secrets.GITHUB_TOKEN }}
-          sparse-checkout: babeldoc/assets/embedding_assets_metadata.py
-          
-      - name: Cached Assets
-        id: cache-assets
-        uses: actions/cache@v4.2.2
-        with:
-          path: ~/.cache/babeldoc
-          key: test-1-babeldoc-assets-${{ hashFiles('babeldoctemp1234567/babeldoc/assets/embedding_assets_metadata.py') }}
-          
-      - name: 检出代码
-        uses: actions/checkout@v5
-
-      - name: Setup uv with Python ${{ env.WIN_EXE_PYTHON_VERSION }}
-        uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3
-        with:
-          python-version: ${{ env.WIN_EXE_PYTHON_VERSION }}
-          enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
-          activate-environment: true
-
-      - name: 构建Windows EXE
-        shell: pwsh
-        run: |
-          Write-Host "==== 创建必要的目录 ===="
-          New-Item -Path "./build" -ItemType Directory -Force
-          New-Item -Path "./build/runtime" -ItemType Directory -Force
-          New-Item -Path "./dep_build" -ItemType Directory -Force
-
-          Write-Host "==== 复制代码到 dep_build ===="
-          Get-ChildItem -Path "./" -Exclude "dep_build", "build" | Copy-Item -Destination "./dep_build" -Recurse -Force
-
-          Write-Host "==== 下载并解压 Python ${{ env.WIN_EXE_PYTHON_VERSION }} ===="
-          $pythonUrl = "https://www.python.org/ftp/python/${{ env.WIN_EXE_PYTHON_VERSION }}/python-${{ env.WIN_EXE_PYTHON_VERSION }}-embed-amd64.zip"
-          $pythonZip = "./dep_build/python.zip"
-          Invoke-WebRequest -Uri $pythonUrl -OutFile $pythonZip
-          Expand-Archive -Path $pythonZip -DestinationPath "./build/runtime" -Force
-
-          Write-Host "==== 下载 VC++ Redistributable ===="
-          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "./build/无法运行请安装2_vc_redist17.x64.exe"
-          Invoke-WebRequest -Uri "https://aka.ms/vs/15/release/vc_redist.x64.exe" -OutFile "./build/无法运行请安装1_vc_redist15.x64.exe"
-
-          Write-Host "==== 下载并解压 PyStand ===="
-          $pystandUrl = "https://github.com/skywind3000/PyStand/releases/download/1.1.4/PyStand-v1.1.4-exe.zip"
-          Invoke-WebRequest -Uri $pystandUrl -OutFile "./dep_build/PyStand.zip"
-          Expand-Archive -Path "./dep_build/PyStand.zip" -DestinationPath "./dep_build/PyStand" -Force
-          Copy-Item -Path "./dep_build/PyStand/PyStand-x64-CLI/PyStand.exe" -Destination "./build/pdf2zh.exe" -Force
-
-          Write-Host "==== 创建 venv 并安装依赖 ===="
-          uv venv ./dep_build/venv
-          ./dep_build/venv/Scripts/activate
-          uv pip install .
-          uv pip install --compile-bytecode BabelDOC[directml]
-
-          Write-Host "==== 复制 site-packages ===="
-          Copy-Item -Path "./dep_build/venv/Lib/site-packages" -Destination "./build/site-packages" -Recurse -Force
-
-          Write-Host "==== 复制配置文件 ===="
-          Copy-Item -Path "./script/_pystand_static.int" -Destination "./build/_pystand_static.int" -Force
-
-      - name: Get BabelDOC version
-        id: get-babeldoc-version
-        shell: pwsh
-        run: |
-          ./dep_build/venv/Scripts/activate
-          $version = (uv pip show BabelDOC | Select-String -Pattern "Version:").Line.Split(' ')[1].Trim()
-          echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Generate offline assets
-        shell: pwsh
-        run: |
-          ./dep_build/venv/Scripts/activate
-          babeldoc --generate-offline-assets ./build
-      
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: win64-exe-with-assets
-          path: ./build
-          compression-level: 1
-
-  # Docker构建 - AMD64
   build-docker-amd64:
     runs-on: ubuntu-latest
-    needs: build-win64-exe
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -129,7 +34,7 @@ jobs:
       - name: Extract version from pyproject.toml
         id: get-version
         run: |
-          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = \"\\(.*\\)\"/\\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           MAJOR=$(echo $VERSION | cut -d. -f1)
           echo "major=$MAJOR" >> $GITHUB_OUTPUT
@@ -151,58 +56,3 @@ jobs:
             ${{ env.GHCR_REPO_LOWER }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # 创建Release（可选）
-  create-release:
-    needs: [build-win64-exe, build-docker-amd64]
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Download Windows EXE
-        uses: actions/download-artifact@v6
-        with:
-          name: win64-exe-with-assets
-          path: ./build
-
-      - name: Extract version from pyproject.toml
-        id: get-version
-        run: |
-          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Creating release for version: $VERSION"
-
-      - name: Convert to lowercase
-        run: |
-          echo "GHCR_REPO_LOWER=$(echo ${{ env.GHCR_REPO }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-
-      - name: Create ZIP
-        run: |
-          mv ./build ./pdf2zh
-          zip -9qr "pdf2zh-win64-v${{ steps.get-version.outputs.version }}.zip" ./pdf2zh/*
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: v${{ steps.get-version.outputs.version }}
-          name: Release v${{ steps.get-version.outputs.version }}
-          draft: false
-          prerelease: false
-          files: pdf2zh-win64-v${{ steps.get-version.outputs.version }}.zip
-          body: |
-            ## 🚀 Release v${{ steps.get-version.outputs.version }}
-            
-            ### 📦 Downloads
-            - **Windows EXE**: `pdf2zh-win64-v${{ steps.get-version.outputs.version }}.zip`
-            
-            ### 🐳 Docker Images
-            ```bash
-            docker pull ${{ env.GHCR_REPO_LOWER }}:${{ steps.get-version.outputs.version }}
-            ```
-            
-            ### 📝 Changes
-            Built from commit: ${{ github.sha }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
