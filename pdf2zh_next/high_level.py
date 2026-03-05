@@ -554,12 +554,27 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
 
         table_model = RapidOCRModel()
 
+    doc_layout_model = None
+    rpc_doclayout = (settings.translation.rpc_doclayout or "").strip()
+    if rpc_doclayout:
+        try:
+            from babeldoc.docvision.rpc_doclayout import RpcDocLayoutModel
+
+            doc_layout_model = RpcDocLayoutModel.from_host(rpc_doclayout)
+            logger.info("Using RPC doclayout service: %s", rpc_doclayout)
+        except Exception as e:
+            logger.warning(
+                "Failed to init RPC doclayout (%s), falling back to local model. Error: %s",
+                rpc_doclayout,
+                e,
+            )
+
     babeldoc_config = BabelDOCConfig(
         input_file=file,
         font=None,
         pages=settings.pdf.pages,
         output_dir=settings.translation.output,
-        doc_layout_model=None,
+        doc_layout_model=doc_layout_model,
         translator=translator,
         debug=settings.basic.debug,
         lang_in=settings.translation.lang_in,
