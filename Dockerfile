@@ -6,6 +6,11 @@ WORKDIR /app
 EXPOSE 7860
 
 ENV PYTHONUNBUFFERED=1
+ENV OMP_NUM_THREADS=2
+ENV OPENBLAS_NUM_THREADS=2
+ENV MKL_NUM_THREADS=2
+ENV NUMEXPR_NUM_THREADS=2
+ENV BABELDOC_DOCLAYOUT_BATCH_SIZE=64
 
 # # Download all required fonts
 # ADD "https://github.com/satbyy/go-noto-universal/releases/download/v7.0/GoNotoKurrent-Regular.ttf" /app/
