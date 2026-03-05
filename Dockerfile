@@ -11,6 +11,7 @@ ENV OPENBLAS_NUM_THREADS=2
 ENV MKL_NUM_THREADS=2
 ENV NUMEXPR_NUM_THREADS=2
 ENV BABELDOC_DOCLAYOUT_BATCH_SIZE=64
+ENV PDF2ZH_MAX_CONCURRENT_TRANSLATIONS=1
 
 # # Download all required fonts
 # ADD "https://github.com/satbyy/go-noto-universal/releases/download/v7.0/GoNotoKurrent-Regular.ttf" /app/

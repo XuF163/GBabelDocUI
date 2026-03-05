@@ -11,6 +11,7 @@ This module provides REST API endpoints for:
 import asyncio
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,27 @@ user_manager = UserManager()
 
 # In-memory storage for active translation tasks
 active_tasks = {}
+
+def _get_positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+# Limit how many translations can run concurrently.
+# Each translation runs heavy work in a subprocess (DocLayout/onnxruntime) and can
+# consume significant CPU/RAM, so unconstrained concurrency may cause OOM or
+# severe thrashing on small instances (e.g. 2 vCPU).
+MAX_CONCURRENT_TRANSLATIONS = _get_positive_int_env(
+    "PDF2ZH_MAX_CONCURRENT_TRANSLATIONS",
+    1,
+)
+translation_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TRANSLATIONS)
 
 
 # Pydantic models for request/response
@@ -642,110 +664,131 @@ async def run_translation(task_id: str, file_path: Path, output_dir: Path, trans
     original_filename = file_path.stem  # Get filename without extension
     
     try:
-        active_tasks[task_id]["status"] = "processing"
-        active_tasks[task_id]["message"] = "Loading user settings..."
-        active_tasks[task_id]["original_filename"] = original_filename  # Store for download filename
+        # If the task entry is deleted (e.g. user deletes history), treat it as cancelled.
+        if task_id not in active_tasks:
+            return
+
+        # Keep "queued" until a worker slot is available.
+        active_tasks[task_id]["status"] = "queued"
+        active_tasks[task_id]["message"] = "Translation queued"
+
+        async with translation_semaphore:
+            if task_id not in active_tasks:
+                return
+
+            active_tasks[task_id]["status"] = "processing"
+            active_tasks[task_id]["message"] = "Loading user settings..."
+            active_tasks[task_id]["original_filename"] = original_filename  # Store for download filename
         
-        # Load user settings
-        user_dir = user_manager.get_user_dir(username)
-        settings_file = user_dir / "settings.json"
-        user_settings = json.loads(settings_file.read_text()) if settings_file.exists() else {}
-        
-        # Get pages from translation_settings if provided
-        pages = translation_settings.get('pages') if translation_settings else None
-        
-        logger.info(f"Starting translation task {task_id} for user {username}")
-        logger.info(f"User settings: {user_settings}")
-        
-        # Build SettingsModel from user config
-        settings = build_settings_model_from_user_config(user_settings, output_dir, pages)
-        
-        # Validate settings
-        try:
-            settings.validate_settings()
-        except ValueError as e:
-            raise ValueError(f"Invalid translation settings: {e}")
-        
-        active_tasks[task_id]["message"] = "Starting translation..."
-        
-        # Run translation using do_translate_async_stream
-        async for event in do_translate_async_stream(settings, file_path):
-            if event["type"] in ("progress_start", "progress_update", "progress_end"):
-                # Update progress
-                stage = event.get("stage", "Processing")
-                progress = event.get("overall_progress", 0)
-                part_index = event.get("part_index", 1)
-                total_parts = event.get("total_parts", 1)
-                stage_current = event.get("stage_current", 0)
-                stage_total = event.get("stage_total", 1)
-                
-                message = f"{stage} ({part_index}/{total_parts}, {stage_current}/{stage_total})"
-                
-                active_tasks[task_id]["progress"] = int(progress)
-                active_tasks[task_id]["message"] = message
-                
-                logger.debug(f"Task {task_id}: {progress}% - {message}")
-                
-            elif event["type"] == "finish":
-                # Translation completed
-                result = event["translate_result"]
-                
-                # Get actual output paths from the result
-                result_mono_path = result.mono_pdf_path
-                result_dual_path = result.dual_pdf_path
-                
-                # Rename output files to use original filename
-                if result_mono_path and result_mono_path.exists():
-                    mono_path = output_dir / f"{original_filename}_mono.pdf"
-                    result_mono_path.rename(mono_path)
-                    logger.info(f"Mono PDF saved: {mono_path}")
-                
-                if result_dual_path and result_dual_path.exists():
-                    dual_path = output_dir / f"{original_filename}_dual.pdf"
-                    result_dual_path.rename(dual_path)
-                    logger.info(f"Dual PDF saved: {dual_path}")
-                
-                # Get token usage if available
-                token_usage = event.get("token_usage", {})
-                
-                break
-                
-            elif event["type"] == "error":
-                error_msg = event.get("error", "Unknown error")
-                raise RuntimeError(f"Translation error: {error_msg}")
-        
-        # Mark as complete
-        active_tasks[task_id]["status"] = "completed"
-        active_tasks[task_id]["progress"] = 100
-        active_tasks[task_id]["message"] = "Translation completed"
-        active_tasks[task_id]["output_files"] = {
-            "mono": str(mono_path) if mono_path else None,
-            "dual": str(dual_path) if dual_path else None
-        }
-        active_tasks[task_id]["original_filename"] = original_filename
-        
-        # Update user history
-        history_file = user_dir / "history.json"
-        history = json.loads(history_file.read_text()) if history_file.exists() else []
-        history.append({
-            "task_id": task_id,
-            "file_id": active_tasks[task_id].get("file_id"),
-            "filename": file_path.name,
-            "original_filename": original_filename,
-            "created_at": active_tasks[task_id]["created_at"],
-            "completed_at": datetime.utcnow().isoformat(),
-            "status": "completed",
-            "mono_path": str(mono_path) if mono_path else None,
-            "dual_path": str(dual_path) if dual_path else None
-        })
-        history_file.write_text(json.dumps(history, indent=2))
-        
-        logger.info(f"Translation task {task_id} completed successfully")
+            # Load user settings
+            user_dir = user_manager.get_user_dir(username)
+            settings_file = user_dir / "settings.json"
+            user_settings = json.loads(settings_file.read_text()) if settings_file.exists() else {}
+
+            # Get pages from translation_settings if provided
+            pages = translation_settings.get('pages') if translation_settings else None
+
+            logger.info(f"Starting translation task {task_id} for user {username}")
+            logger.info(f"User settings: {user_settings}")
+
+            # Build SettingsModel from user config
+            settings = build_settings_model_from_user_config(user_settings, output_dir, pages)
+
+            # Validate settings
+            try:
+                settings.validate_settings()
+            except ValueError as e:
+                raise ValueError(f"Invalid translation settings: {e}")
+
+            if task_id not in active_tasks:
+                return
+            active_tasks[task_id]["message"] = "Starting translation..."
+
+            # Run translation using do_translate_async_stream
+            async for event in do_translate_async_stream(settings, file_path):
+                if task_id not in active_tasks:
+                    return
+
+                if event["type"] in ("progress_start", "progress_update", "progress_end"):
+                    # Update progress
+                    stage = event.get("stage", "Processing")
+                    progress = event.get("overall_progress", 0)
+                    part_index = event.get("part_index", 1)
+                    total_parts = event.get("total_parts", 1)
+                    stage_current = event.get("stage_current", 0)
+                    stage_total = event.get("stage_total", 1)
+
+                    message = f"{stage} ({part_index}/{total_parts}, {stage_current}/{stage_total})"
+
+                    active_tasks[task_id]["progress"] = int(progress)
+                    active_tasks[task_id]["message"] = message
+
+                    logger.debug(f"Task {task_id}: {progress}% - {message}")
+
+                elif event["type"] == "finish":
+                    # Translation completed
+                    result = event["translate_result"]
+
+                    # Get actual output paths from the result
+                    result_mono_path = result.mono_pdf_path
+                    result_dual_path = result.dual_pdf_path
+
+                    # Rename output files to use original filename
+                    if result_mono_path and result_mono_path.exists():
+                        mono_path = output_dir / f"{original_filename}_mono.pdf"
+                        result_mono_path.rename(mono_path)
+                        logger.info(f"Mono PDF saved: {mono_path}")
+
+                    if result_dual_path and result_dual_path.exists():
+                        dual_path = output_dir / f"{original_filename}_dual.pdf"
+                        result_dual_path.rename(dual_path)
+                        logger.info(f"Dual PDF saved: {dual_path}")
+
+                    # Get token usage if available
+                    token_usage = event.get("token_usage", {})
+
+                    break
+
+                elif event["type"] == "error":
+                    error_msg = event.get("error", "Unknown error")
+                    raise RuntimeError(f"Translation error: {error_msg}")
+
+            if task_id not in active_tasks:
+                return
+
+            # Mark as complete
+            active_tasks[task_id]["status"] = "completed"
+            active_tasks[task_id]["progress"] = 100
+            active_tasks[task_id]["message"] = "Translation completed"
+            active_tasks[task_id]["output_files"] = {
+                "mono": str(mono_path) if mono_path else None,
+                "dual": str(dual_path) if dual_path else None
+            }
+            active_tasks[task_id]["original_filename"] = original_filename
+
+            # Update user history
+            history_file = user_dir / "history.json"
+            history = json.loads(history_file.read_text()) if history_file.exists() else []
+            history.append({
+                "task_id": task_id,
+                "file_id": active_tasks[task_id].get("file_id"),
+                "filename": file_path.name,
+                "original_filename": original_filename,
+                "created_at": active_tasks[task_id]["created_at"],
+                "completed_at": datetime.utcnow().isoformat(),
+                "status": "completed",
+                "mono_path": str(mono_path) if mono_path else None,
+                "dual_path": str(dual_path) if dual_path else None
+            })
+            history_file.write_text(json.dumps(history, indent=2))
+
+            logger.info(f"Translation task {task_id} completed successfully")
         
     except Exception as e:
         logger.error(f"Translation task {task_id} failed: {e}", exc_info=True)
-        active_tasks[task_id]["status"] = "failed"
-        active_tasks[task_id]["message"] = f"Translation failed: {str(e)}"
+        if task_id in active_tasks:
+            active_tasks[task_id]["status"] = "failed"
+            active_tasks[task_id]["message"] = f"Translation failed: {str(e)}"
         
         # Update history with failed status
         try:
