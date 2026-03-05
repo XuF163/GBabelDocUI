@@ -34,10 +34,10 @@ jobs:
       - name: Extract version from pyproject.toml
         id: get-version
         run: |
-          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = \"\\(.*\\)\"/\\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          MAJOR=$(echo $VERSION | cut -d. -f1)
-          echo "major=$MAJOR" >> $GITHUB_OUTPUT
+          VERSION=$(grep -m1 '^version = ' pyproject.toml | cut -d '"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          MAJOR="${VERSION%%.*}"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
           echo "Extracted version: $VERSION (major: $MAJOR)"
 
       - name: Convert to lowercase
